@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>РосТрелло</title>
+  <style>
+    :root{--bg:#0f172a;--card:#111827;--muted:#94a3b8;--accent:#22d3ee;--danger:#ef4444;--ok:#10b981}
+    *{box-sizing:border-box}
+    body{margin:0;padding:24px;font-family:system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";background:linear-gradient(120deg,#0f172a,#111827);color:#e5e7eb}
+    h1{margin:0 0 8px;font-size:28px}
+    .sub{color:var(--muted);margin-bottom:20px}
+    .wrap{display:grid;grid-template-columns:300px 1fr;gap:16px;align-items:start}
+    .card{background:rgba(255,255,255,.04);backdrop-filter: blur(6px);border:1px solid rgba(255,255,255,.06);border-radius:16px;padding:14px}
+    input,button,select{font:inherit}
+    input[type="text"], input[type="date"]{width:100%;padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.12);background:#0b1220;color:#e5e7eb;outline:none}
+    input::placeholder{color:#64748b}
+    button{cursor:pointer;border:0;border-radius:12px;padding:10px 12px;background:#1f2a44;color:#e5e7eb}
+    button:hover{filter:brightness(1.15)}
+    .btn-danger{background: #3b0d12}
+    .btn-ok{background: #073b2b}
+    .stack{display:flex;gap:8px}
+    .cols{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+    .col{min-height:240px}
+    .col header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;color:#cbd5e1}
+    .list{display:flex;flex-direction:column;gap:8px;min-height:180px;border:1px dashed rgba(255,255,255,.12);border-radius:12px;padding:8px}
+    .task{display:grid;grid-template-columns:1fr auto;gap:6px;align-items:start;background:#0b1220;border:1px solid rgba(255,255,255,.06);padding:10px;border-radius:12px}
+    .title{font-weight:600}
+    .meta{font-size:12px;color:#94a3b8}
+    .task footer{display:flex;gap:6px}
+    .ghost{opacity:.5}
+    .counts{font-size:12px;color:#94a3b8}
+    .filter{margin-top:8px}
+    .hint{color:#94a3b8;font-size:12px;margin-top:8px}
+    .warn{color:#fbbf24}
+  </style>
+  <!--
+  ЗАДУМАННЫЕ БАГИ (для тренировки тестирования)
+  1) XSS: заголовок задачи вставляется через innerHTML, а не textContent → можно внедрить HTML/скрипт.
+  2) Потеря сохранений: saveTasks пишет в localStorage по ключу "tasks", а loadTasks читает из "task" (без s).
+  3) Счётчики: updateCounts вызывается не везде (на удаление/перетаскивание не всегда срабатывает).
+  4) DnD-дублирование: при дропе в ту же колонку элемент клонируется → дубликаты.
+  5) Редактирование: изменение заголовка не синхронизируется с "моделью" → после перезагрузки теряется.
+  6) Утечка: на каждое добавление навешивается window.onresize listener → множатся обработчики.
+  7) Сортировка сроков: сравнение дат как строк, а не как Date → неверный порядок.
+  8) Фильтр: фильтрация через полную перерисовку innerHTML ломает текущие обработчики (флейки).
+  9) Двойное добавление: и по Enter и по клику вызывают add без дебаунса; иногда срабатывают оба.
+  10) Не все aria-атрибуты/label присутствуют → проблемы доступности.
+  -->
+</head>
+<body>
+  <h1>РосДоскаЗадач</h1>
+  <p class="sub"></p>
+
+  <div class="wrap">
+    <section class="card">
+      <h3 style="margin-top:4px;margin-bottom:8px">Новая задача</h3>
+      <div class="stack" style="margin-bottom:8px">
+        <input id="title" type="text" placeholder="Что нужно сделать? (можно даже <b>HTML</b>)" />
+      </div>
+      <div class="stack" style="margin-bottom:8px">
+        <input id="due" type="date" />
+        <button id="add">Добавить</button>
+      </div>
+      <div class="filter">
+        <input id="filter" type="text" placeholder="Фильтр по названию…"/>
+      </div>
+      <div class="hint">Подсказка: перетаскивайте карточки между колонками. Двойной клик по заголовку — редактирование.</div>
+      <hr style="margin:12px 0;border-color:rgba(255,255,255,.1)">
+      <div class="counts">Backlog: <span id="c-backlog">0</span> • In Progress: <span id="c-progress">0</span> • Done: <span id="c-done">0</span></div>
+      <div class="hint">Сортировка по сроку (<button id="sortAsc">⭡</button> <button id="sortDesc">⭣</button>) — <span class="warn">намеренно криво</span>.</div>
+    </section>
+
+    <section class="cols">
+      <div class="card col" data-col="backlog">
+        <header>
+          <div>Backlog</div>
+          <div class="counts" id="count-backlog"></div>
+        </header>
+        <div class="list" id="backlog" aria-label="Backlog" tabindex="0"></div>
+      </div>
+      <div class="card col" data-col="progress">
+        <header>
+          <div>In Progress</div>
+          <div class="counts" id="count-progress"></div>
+        </header>
+        <div class="list" id="progress" aria-label="In Progress" tabindex="0"></div>
+      </div>
+      <div class="card col" data-col="done">
+        <header>
+          <div>Done</div>
+          <div class="counts" id="count-done"></div>
+        </header>
+        <div class="list" id="done" aria-label="Done" tabindex="0"></div>
+      </div>
+    </section>
+  </div>
+
+<script>
+// ===== Супер-простая «модель» =====
+let state = {
+  backlog: [],
+  progress: [],
+  done: []
+};
+
+// ===== Элементы =====
+const els = {
+  title: document.getElementById('title'),
+  due: document.getElementById('due'),
+  add: document.getElementById('add'),
+  filter: document.getElementById('filter'),
+  lists: {
+    backlog: document.getElementById('backlog'),
+    progress: document.getElementById('progress'),
+    done: document.getElementById('done')
+  },
+  c: {
+    backlog: document.getElementById('c-backlog'),
+    progress: document.getElementById('c-progress'),
+    done: document.getElementById('c-done'),
+  },
+  sortAsc: document.getElementById('sortAsc'),
+  sortDesc: document.getElementById('sortDesc')
+};
+
+// ===== Утилиты =====
+const uid = () => Math.random().toString(36).slice(2,9);
+
+function saveTasks(){
+  // BUG #2: пишем в ключ 'tasks'
+  localStorage.setItem('tasks', JSON.stringify(state));
+}
+function loadTasks(){
+  // BUG #2: читаем из другого ключа 'task' → ничего не загружается
+  const raw = localStorage.getItem('task');
+  if(!raw) return;
+  try{ state = JSON.parse(raw); }
+  catch(e){ console.warn('parse fail', e); }
+}
+
+function updateCounts(){
+  els.c.backlog.textContent = state.backlog.length;
+  els.c.progress.textContent = state.progress.length;
+  els.c.done.textContent = state.done.length;
+  // В заголовках колонок — намеренно не обновляем всегда → BUG #3 частично проявляется
+  document.getElementById('count-backlog').textContent = state.backlog.length + ' шт.';
+  document.getElementById('count-progress').textContent = state.progress.length + ' шт.';
+  document.getElementById('count-done').textContent = state.done.length + ' шт.';
+}
+
+function renderColumn(name){
+  const listEl = els.lists[name];
+  listEl.innerHTML = '';
+  for(const t of state[name]){
+    const node = renderTask(t, name);
+    listEl.appendChild(node);
+  }
+}
+
+function renderAll(){
+  renderColumn('backlog');
+  renderColumn('progress');
+  renderColumn('done');
+  updateCounts();
+}
+
+// ===== Создание DOM задачи (с багами) =====
+function renderTask(task, col){
+  const wrap = document.createElement('div');
+  wrap.className = 'task';
+  wrap.draggable = true;
+  wrap.dataset.id = task.id;
+
+  const title = document.createElement('div');
+  title.className = 'title';
+  // BUG #1: XSS — вставляем innerHTML
+  title.innerHTML = task.title || '(без названия)';
+  title.title = 'Двойной клик — редактировать';
+
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  meta.textContent = task.due ? ('Срок: ' + task.due) : 'Срок не задан';
+
+  const controls = document.createElement('footer');
+  const btnDel = document.createElement('button');
+  btnDel.textContent = 'Удалить';
+  btnDel.className = 'btn-danger';
+  const btnEdit = document.createElement('button');
+  btnEdit.textContent = 'Редактировать';
+  const btnDone = document.createElement('button');
+  btnDone.textContent = 'Готово';
+  btnDone.className = 'btn-ok';
+
+  controls.append(btnEdit, btnDone, btnDel);
+
+  const left = document.createElement('div');
+  left.append(title, meta);
+
+  wrap.append(left, controls);
+
+  // DnD
+  wrap.addEventListener('dragstart', (e)=>{
+    wrap.classList.add('ghost');
+    e.dataTransfer.setData('text/plain', JSON.stringify({id: task.id, from: col}));
+  });
+  wrap.addEventListener('dragend', ()=>wrap.classList.remove('ghost'));
+
+  // Редактирование (BUG #5 — не сохраняем в state)
+  title.addEventListener('dblclick', ()=>{
+    title.contentEditable = true;
+    title.focus();
+  });
+  title.addEventListener('blur', ()=>{
+    title.contentEditable = false;
+    // визуально меняется, но state не обновляем → потеряется
+  });
+
+  // Удаление
+  btnDel.addEventListener('click', ()=>{
+    state[col] = state[col].filter(x=>x.id!==task.id);
+    // BUG #3: забыли обновить счётчики после удаления иногда — делаем только частичную перерисовку
+    renderColumn(col);
+    saveTasks();
+  });
+
+  // Перенос в Done
+  btnDone.addEventListener('click', ()=>{
+    state[col] = state[col].filter(x=>x.id!==task.id);
+    state.done.push(task);
+    renderAll();
+    saveTasks();
+  });
+
+  return wrap;
+}
+
+// ===== DnD на колонках (с багом дублирования) =====
+for(const [name, listEl] of Object.entries(els.lists)){
+  listEl.addEventListener('dragover', (e)=>{ e.preventDefault(); listEl.classList.add('ghost'); });
+  listEl.addEventListener('dragleave', ()=> listEl.classList.remove('ghost'));
+  listEl.addEventListener('drop', (e)=>{
+    e.preventDefault(); listEl.classList.remove('ghost');
+    try{
+      const payload = JSON.parse(e.dataTransfer.getData('text/plain'));
+      const from = payload.from; const id = payload.id;
+      const sourceArr = state[from];
+      const idx = sourceArr.findIndex(x=>x.id===id);
+      if(idx>-1){
+        const task = sourceArr[idx];
+        // BUG #4: если дроп в ту же колонку — не вырезаем из исходного массива, а клонируем → дубликат
+        if(from!==name){ sourceArr.splice(idx,1); }
+        state[name].push({...task});
+        renderAll();
+        saveTasks();
+      }
+    }catch(err){ console.warn(err); }
+  });
+}
+
+// ===== Добавление задач (с парой багов) =====
+function addTask(){
+  const title = els.title.value.trim();
+  const due = els.due.value;
+  if(!title){
+    // минимальная валидация
+    els.title.focus();
+    return;
+  }
+  const t = { id: uid(), title, due, createdAt: Date.now() };
+  state.backlog.push(t);
+  renderColumn('backlog');
+  updateCounts(); // иногда забываем вызывать в других местах → рассинхрон
+  saveTasks();
+
+  // BUG #6: каждый раз добавляем обработчик resize → утечки
+  window.addEventListener('resize', ()=>{
+    document.title = 'Ширина: ' + window.innerWidth;
+  });
+
+  els.title.value='';
+  els.due.value='';
+}
+
+// Двойные триггеры → BUG #9 в редких случаях
+els.add.addEventListener('click', addTask);
+els.title.addEventListener('keydown', (e)=>{
+  if(e.key==='Enter') addTask();
+});
+
+// ===== Фильтр (ломает обработчики у перерисованных узлов) =====
+els.filter.addEventListener('input', ()=>{
+  const q = els.filter.value.toLowerCase();
+  for(const name of ['backlog','progress','done']){
+    // Полная перерисовка через innerHTML → теряем некоторые transient-состояния
+    const list = els.lists[name];
+    list.innerHTML = '';
+    state[name]
+      .filter(t=> (t.title||'').toLowerCase().includes(q))
+      .forEach(t=> list.appendChild(renderTask(t, name)));
+  }
+});
+
+// ===== Сортировка по "сроку" (BUG #7 — сравнение как строк) =====
+function sortByDue(dir){
+  for(const name of ['backlog','progress','done']){
+    state[name].sort((a,b)=>{
+      const aa = a.due || '';
+      const bb = b.due || '';
+      if(dir==='asc') return aa>bb?1:-1; // неправильно для дат
+      else return aa<bb?1:-1;
+    });
+  }
+  renderAll();
+}
+els.sortAsc.addEventListener('click', ()=>sortByDue('asc'));
+els.sortDesc.addEventListener('click', ()=>sortByDue('desc'));
+
+// ===== Инициализация =====
+loadTasks();
+renderAll();
+
+// Немного стартовых данных
+if(state.backlog.length + state.progress.length + state.done.length === 0){
+  state.backlog.push(
+    {id: uid(), title: 'Открыть этот файл и поиграться', due: ''},
+    {id: uid(), title: 'Найти и описать 5 багов', due: ''},
+    {id: uid(), title: 'Попробовать вставить <i>HTML</i> в заголовок', due: ''}
+  );
+  renderAll();
+}
+</script>
+</body>
+</html>
